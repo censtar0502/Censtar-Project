@@ -1,4 +1,5 @@
 /* File: Core/Src/main.c */
+/* 01.02.2025*/
 #include "main.h"
 #include "i2c.h"
 #include "spi.h"
