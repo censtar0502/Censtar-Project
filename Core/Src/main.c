@@ -1,4 +1,4 @@
-/* File: Core/Src/main.c */
+// File: Core/Src/main.c
 /* 01.02.2025 15,00*/
 #include "main.h"
 #include "i2c.h"
@@ -7,6 +7,7 @@
 #include "usart.h"
 #include "gpio.h"
 
+#include "app_u8g2_demo.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -15,15 +16,13 @@
 /* =========================
  *  Константы протокола GKL
  * ========================= */
-#define GKL_STX              0x02u
-#define GKL_FIXED_FRAME_LEN  7u   /* 02 00 ADDR 'S' '1' '0' STATUS */
-#define GKL_ADDR_TRK1        0x01u
-#define GKL_ADDR_TRK2        0x02u
-
-/* Команда опроса (последний байт запроса) — по вашим логам:
- * TRK-1: 'R' (0x52), TRK-2: 'Q' (0x51) */
-#define GKL_CMD_POLL_TRK1    0x52u /* 'R' */
-#define GKL_CMD_POLL_TRK2    0x51u /* 'Q' */
+#define GKL_STX                 0x02
+#define GKL_ADDR_TRK1           0x01
+#define GKL_ADDR_TRK2           0x02
+#define GKL_CMD_STATUS          'S'
+#define GKL_CMD_POLL_TRK1       'R'
+#define GKL_CMD_POLL_TRK2       'Q'
+#define GKL_FIXED_FRAME_LEN     7   /* 02 00 ADDR 'S' 31 30 CRC/последний — по логам фикс. 7 байт */
 
 /* Тайминги */
 #define POLL_INTERVAL_MS     200u  /* период опроса каждого ТРК */
@@ -56,13 +55,12 @@ static void Log_Proto(const char *fmt, ...)
     HAL_UART_Transmit(&huart2, (uint8_t*)buf, (uint16_t)strlen(buf), 200);
 }
 
-/* Красиво вывести массив байт в hex (для логов) */
-static const char* hex_buf_to_string(const uint8_t *data, uint16_t len)
+/* Вспомогательный буфер и форматтер для HEX-вывода */
+static char* hex_buf_to_string(const uint8_t *data, uint16_t len)
 {
-    static char line[3 * 64 + 4]; /* до 64 байт на строку */
-    uint16_t n = (len > 64) ? 64 : len;
+    static char line[3 * 64 + 4]; /* достаточно для коротких кадров */
     uint16_t pos = 0;
-    for (uint16_t i = 0; i < n; ++i)
+    for (uint16_t i = 0; i < len; i++)
     {
         int written = snprintf(&line[pos], sizeof(line) - pos, "%02X ", data[i]);
         if (written < 0) break;
@@ -95,64 +93,46 @@ static void Parser_Reset(gkl_parser_t *p)
     p->last_byte_ms = 0;
 }
 
-static bool Parser_IsComplete(const gkl_parser_t *p)
+static void Parser_Push(gkl_parser_t *p, uint8_t b)
 {
-    return (p->idx == GKL_FIXED_FRAME_LEN);
+    if (p->idx < GKL_FIXED_FRAME_LEN) {
+        p->buf[p->idx++] = b;
+        p->last_byte_ms = HAL_GetTick();
+    }
 }
 
-/* Приходит один байт RX — собираем кадр фиксированной длины */
-static void Parser_OnByte(gkl_parser_t *p, uint8_t b)
+static bool Parser_IsComplete(gkl_parser_t *p)
 {
+    return (p->idx >= GKL_FIXED_FRAME_LEN);
+}
+
+static void Parser_TryFlushOnTimeout(gkl_parser_t *p)
+{
+    if (p->idx == 0) return;
     uint32_t now = HAL_GetTick();
-
-    /* Межбайтовый разрыв — сброс сборки */
-    if (p->idx > 0 && (now - p->last_byte_ms) > INTERBYTE_GAP_RESET_MS)
-    {
-        p->idx = 0;
-    }
-    p->last_byte_ms = now;
-
-    if (p->idx == 0)
-    {
-        if (b == GKL_STX)
-        {
-            p->buf[p->idx++] = b;
-        }
-        else
-        {
-            /* игнор до STX */
-            return;
-        }
-    }
-    else
-    {
-        if (p->idx < GKL_FIXED_FRAME_LEN)
-        {
-            p->buf[p->idx++] = b;
-        }
-        /* если превысили — защитный сброс */
-        if (p->idx > GKL_FIXED_FRAME_LEN)
-        {
-            p->idx = 0;
-        }
+    if ((now - p->last_byte_ms) > INTERBYTE_GAP_RESET_MS) {
+        /* Межбайтовый разрыв — сбрасываем парсер */
+        Log_Proto("[t=%lu ms][Parser] interbyte gap, flush partial len=%u\r\n",
+                  (unsigned long)now, (unsigned)p->idx);
+        Parser_Reset(p);
     }
 }
 
 /* =========================
- *  FSM для каждого порта
+ *  Описание TRK-портов
  * ========================= */
 typedef enum {
-    PORT_IDLE = 0,   /* можно отправлять новый запрос */
-    PORT_WAIT_RX,    /* запрос отправлен, ждём полный ответ */
+    PORT_IDLE = 0,
+    PORT_WAIT_REPLY
 } port_state_t;
 
 typedef struct {
     UART_HandleTypeDef *huart;
-    const char         *tag;     /* "TRK-1" / "TRK-2" */
-    uint8_t             addr;    /* 0x01 / 0x02 */
-    uint8_t             poll_cmd;/* 'R' или 'Q' */
+    const char         *tag;      /* "TRK-1" / "TRK-2" */
+    uint8_t             addr;     /* 1 / 2 */
+    char                poll_cmd; /* 'R' / 'Q' */
     port_state_t        state;
-    uint32_t            t_next_poll_ms; /* когда можно инициировать следующий опрос */
+    uint32_t            t_next_poll_ms;
     uint32_t            t_deadline_ms;  /* таймаут ожидания ответа на текущий запрос */
     gkl_parser_t        parser;
     uint8_t             rx_it_byte;     /* буфер для приёма по 1 байту в IT */
@@ -183,51 +163,41 @@ static HAL_StatusTypeDef TRK_SendPoll(trk_port_t *port)
     return HAL_UART_Transmit(port->huart, out, sizeof(out), 50);
 }
 
-/* Когда парсер накопил 7 байт — проверяем «структуру» и логируем */
+/* =========================
+ *  Обработка полного ответа
+ * ========================= */
 static void TRK_HandleCompleteFrame(trk_port_t *port)
 {
-    const uint8_t *b = port->parser.buf;
-
-    /* Базовая структурная проверка кадра */
-    bool looks_ok = (b[0] == GKL_STX) &&
-                    (b[1] == 0x00)    &&
-                    (b[2] == port->addr) &&
-                    (b[3] == 'S')     &&
-                    (b[4] == '1')     &&
-                    (b[5] == '0');
-
-    if (looks_ok)
-    {
-        Log_Proto("[t=%lu ms][%s][RX] %s\r\n",
-                  (unsigned long)HAL_GetTick(), port->tag,
-                  hex_buf_to_string(b, GKL_FIXED_FRAME_LEN));
-    }
-    else
-    {
-        Log_Proto("[t=%lu ms][%s][RX-BAD] %s\r\n",
-                  (unsigned long)HAL_GetTick(), port->tag,
-                  hex_buf_to_string(b, GKL_FIXED_FRAME_LEN));
-    }
+    /* Просто логируем RX полный кадр (как просили) */
+    Log_Proto(">>> SUCCESS! Parsed response from %s.\r\n", port->tag);
+    Log_Proto("[t=%lu ms][%s][RX] %s\r\n",
+              (unsigned long)HAL_GetTick(), port->tag,
+              hex_buf_to_string(port->parser.buf, GKL_FIXED_FRAME_LEN));
 }
 
 /* =========================
- *  Callbacks UART (RX IT)
+ *  Колбэки UART
  * ========================= */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-    if (huart == TRK1.huart)
-    {
+    if (huart == TRK1.huart) {
         uint8_t b = TRK1.rx_it_byte;
-        Log_Byte("RXb", TRK1.tag, b);
-        Parser_OnByte(&TRK1.parser, b);
-        /* Переармирование приёма по байту */
+        Log_Byte("RXb", "TRK-1", b);
+
+        /* Пушим в парсер ТРК-1 */
+        Parser_Push(&TRK1.parser, b);
+
+        /* Перезапускаем IT-приём по 1 байту */
         HAL_UART_Receive_IT(TRK1.huart, &TRK1.rx_it_byte, 1);
     }
-    else if (huart == TRK2.huart)
-    {
+    else if (huart == TRK2.huart) {
         uint8_t b = TRK2.rx_it_byte;
-        Log_Byte("RXb", TRK2.tag, b);
-        Parser_OnByte(&TRK2.parser, b);
+        Log_Byte("RXb", "TRK-2", b);
+
+        /* Пушим в парсер ТРК-2 */
+        Parser_Push(&TRK2.parser, b);
+
+        /* Перезапускаем IT-приём по 1 байту */
         HAL_UART_Receive_IT(TRK2.huart, &TRK2.rx_it_byte, 1);
     }
 }
@@ -270,7 +240,9 @@ static void TRK_InitPorts(void)
     HAL_UART_Receive_IT(TRK2.huart, &TRK2.rx_it_byte, 1);
 }
 
-/* Шаг FSM для одного порта */
+/* =========================
+ *  Шаг конечного автомата (каждый порт)
+ * ========================= */
 static void TRK_FSM_Step(trk_port_t *port)
 {
     uint32_t now = HAL_GetTick();
@@ -278,24 +250,22 @@ static void TRK_FSM_Step(trk_port_t *port)
     switch (port->state)
     {
         case PORT_IDLE:
-            if (now >= port->t_next_poll_ms)
-            {
-                /* отправляем новый запрос и переходим в ожидание ответа */
-                if (TRK_SendPoll(port) == HAL_OK)
-                {
-                    Parser_Reset(&port->parser);
-                    port->t_deadline_ms  = now + REPLY_TIMEOUT_MS;
-                    port->state          = PORT_WAIT_RX;
-                }
-                else
-                {
-                    /* ошибка TX — переназначим попытку */
+            /* время опроса? — шлём запрос и переходим в ожидание */
+            if (now >= port->t_next_poll_ms) {
+                if (TRK_SendPoll(port) == HAL_OK) {
+                    port->t_deadline_ms = now + REPLY_TIMEOUT_MS;
+                    port->state = PORT_WAIT_REPLY;
+                } else {
+                    /* не удалось отправить — попробуем позже */
                     port->t_next_poll_ms = now + POLL_INTERVAL_MS;
                 }
             }
             break;
 
-        case PORT_WAIT_RX:
+        case PORT_WAIT_REPLY:
+            /* Межбайтовой разрыв — не набирать мусор бесконечно */
+            Parser_TryFlushOnTimeout(&port->parser);
+
             /* полный кадр? — обрабатываем */
             if (Parser_IsComplete(&port->parser))
             {
@@ -327,6 +297,7 @@ static void TRK_FSM_Step(trk_port_t *port)
  * ========================= */
 void SystemClock_Config(void);
 static void MPU_Config(void);
+void Error_Handler(void);
 
 int main(void)
 {
@@ -344,6 +315,9 @@ int main(void)
     MX_USART6_UART_Init();
     MX_SPI2_Init();
 
+    /* === Инициализация дисплея и демо u8g2 === */
+    APP_U8G2_Init();
+
     Log_System("System up.\r\n");
 
     TRK_InitPorts();
@@ -357,6 +331,10 @@ int main(void)
     {
         TRK_FSM_Step(&TRK1);
         TRK_FSM_Step(&TRK2);
+
+        /* Обновление UI (демо/пульс) */
+        APP_U8G2_Loop();
+
         /* Можно добавить лёгкий idle-delay, чтобы снизить нагрузку */
         HAL_Delay(1);
     }
