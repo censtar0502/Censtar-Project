@@ -1,0 +1,34 @@
+# === Build output ===
+/Debug/
+/Release/
+/build/
+/out/
+
+# Object & dependency files
+**/*.o
+**/*.d
+**/*.su
+
+# Binaries, lists, maps, dumps
+**/*.elf
+**/*.bin
+**/*.hex
+**/*.map
+**/*.lst
+**/*.list
+
+# Compiler/IDE caches & temp
+**/*.swp
+**/*~
+**/*.launch
+
+# VS Code (если случайно появится)
+.vscode/
+
+# CMake (если генерируете отдельно)
+CMakeFiles/
+CMakeCache.txt
+cmake-build-*/
+
+# Logs
+*.log
