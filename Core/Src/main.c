@@ -25,9 +25,10 @@
 #define GKL_FIXED_FRAME_LEN     7   /* 02 00 ADDR 'S' 31 30 CRC/последний — по логам фикс. 7 байт */
 
 /* Тайминги */
-#define POLL_INTERVAL_MS     50u  /* период опроса каждого ТРК */
-#define REPLY_TIMEOUT_MS      10u  /* сколько ждём ответ после запроса по КАЖДОМУ порту */
-#define INTERBYTE_GAP_RESET_MS  10u/* если межбайтовый разрыв > X мс, сбрасываем сборку кадра */
+#define POLL_INTERVAL_MS        200u   // можно оставить
+#define REPLY_TIMEOUT_MS         80u   // строго по ts
+#define INTERBYTE_GAP_RESET_MS    3u   // строго по tif
+
 
 /* =========================
  *  Утилиты логирования
