@@ -3,6 +3,8 @@
 /Release/
 /build/
 /out/
+y
+y.pub
 
 # Object & dependency files
 **/*.o
