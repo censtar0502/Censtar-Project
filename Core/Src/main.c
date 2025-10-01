@@ -25,8 +25,8 @@
 #define GKL_FIXED_FRAME_LEN     7   /* 02 00 ADDR 'S' 31 30 CRC/последний — по логам фикс. 7 байт */
 
 /* Тайминги */
-#define POLL_INTERVAL_MS     200u  /* период опроса каждого ТРК */
-#define REPLY_TIMEOUT_MS      80u  /* сколько ждём ответ после запроса по КАЖДОМУ порту */
+#define POLL_INTERVAL_MS     50u  /* период опроса каждого ТРК */
+#define REPLY_TIMEOUT_MS      10u  /* сколько ждём ответ после запроса по КАЖДОМУ порту */
 #define INTERBYTE_GAP_RESET_MS  10u/* если межбайтовый разрыв > X мс, сбрасываем сборку кадра */
 
 /* =========================
@@ -41,7 +41,7 @@ static void Log_System(const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
-    HAL_UART_Transmit(&huart1, (uint8_t*)buf, (uint16_t)strlen(buf), 200);
+    HAL_UART_Transmit(&huart1, (uint8_t*)buf, (uint16_t)strlen(buf), 50);
 }
 
 /* Лог «протокола/двух ТРК» — USART2 */
@@ -52,7 +52,7 @@ static void Log_Proto(const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
-    HAL_UART_Transmit(&huart2, (uint8_t*)buf, (uint16_t)strlen(buf), 200);
+    HAL_UART_Transmit(&huart2, (uint8_t*)buf, (uint16_t)strlen(buf), 50);
 }
 
 /* Вспомогательный буфер и форматтер для HEX-вывода */
